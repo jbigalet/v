@@ -120,27 +120,31 @@ void print_term_caps(const ref Terminfo ti) {
 // but the spec allows string as arguments
 // TODO 'u6' cap does a %d with nothing on the stack...
 
-string _interpret_cap(string s, ref int[] stack, ref int[] args) {
+string _interpret_cap(string s, ref uint i, ref int[] stack, ref int[] args, bool eval) {
+    // i <=> string index
     string o = "";
-    uint i = 0;  // string index
     while(i < s.length) {
         char c = s[i++];
         if(c != '%') {
-            o ~= c;
+            if(eval)
+                o ~= c;
         } else {
             c = s[i++];
             switch(c) {
                 case '%':
+                    if(!eval) break;
                     o ~= '%';
                     break;
 
                 case 'd':
+                    if(!eval) break;
                     assert(stack.length > 0);
                     o ~= to!string(stack.back);
                     stack.popBack();
                     break;
 
                 case 'p':
+                    if(!eval) break;
                     char n = s[i++];
                     assert(n >= '1' && n <= '9');
                     int arg_idx = (n - '1');
@@ -148,8 +152,86 @@ string _interpret_cap(string s, ref int[] stack, ref int[] args) {
                     stack ~= args[arg_idx];
                     break;
 
+                case 'i':
+                    if(!eval) break;
+                    if(args.length > 0) args[0]++;
+                    if(args.length > 1) args[1]++;
+                    break;
+
+                case '{':
+                    int n = 0;
+                    while(true) {
+                        char d = s[i++];
+                        if(d == '}')
+                            break;
+                        else if(d >= '0' && d <= '9')
+                            n = 10*n + (d - '0');
+                        else
+                            assert(0);
+                    }
+                    if(!eval) break;
+                    stack ~= n;
+                    break;
+
+                case '?':
+                    o ~= _interpret_cap(s, i, stack, args, eval);  // read & interpret everything inside the condition
+                    assert(s[i] == 't');
+                    i++;
+                    bool current_eval = eval;
+                    while(true) {
+                        bool eval_then = false;
+                        bool eval_else = false;
+                        if(current_eval) {
+                            assert(stack.length > 0);
+                            if(stack.back != 0)
+                                eval_then = true;
+                            else
+                                eval_else = true;
+                            stack.popBack();
+                        }
+                        o ~= _interpret_cap(s, i, stack, args, eval_then);
+                        char next = s[i++];
+                        if(next == ';')
+                            break;
+                        assert(next == 'e');
+                        o ~= _interpret_cap(s, i, stack, args, eval_else);
+                        next = s[i++];
+                        if(next == ';')
+                            break;
+                        assert(next == 't', "expected ; or t after e, got " ~ to!string(next));  // "else-if a la Algol 68"
+                        current_eval = eval_else;
+                    }
+                    break;
+
+                // TODO autogen logical operations
+                case '>':
+                    if(!eval) break;
+                    assert(stack.length >= 2);
+                    int a = stack.back;
+                    stack.popBack();
+                    int b = stack.back;
+                    stack.popBack();
+                    stack ~= (b > a) ? 1 : 0;  // TODO seemed more logical to swap the args but its against the spec, which may no be correct
+                    break;
+
+                case '=':
+                    if(!eval) break;
+                    assert(stack.length >= 2, "trying to eval = but cannot pop twice. stack is: " ~ to!string(stack) ~ ", before: " ~ s[0..i] ~ " ; after: " ~ s[i+1..$]);
+                    int a = stack.back;
+                    stack.popBack();
+                    int b = stack.back;
+                    stack.popBack();
+                    stack ~= (b == a) ? 1 : 0;  // TODO seemed more logical to swap the args but its against the spec, which may no be correct
+                    break;
+
+                case ';':
+                case 'e':
+                case 't':
+                    i--;
+                    return o;
+
                 // TODO handle everything else
-                default: assert(0);
+                default: assert(0, "unknown cap param type %" ~ to!string(c));
             }
         }
     }
@@ -165,7 +247,10 @@ string interpret_string_cap(ref Terminfo ti, str_caps cap, int[] args...) {
     assert(s.indexOf("%s") == -1);  // TODO
 
     int[] stack;
-    return _interpret_cap(s, stack, args);
+    uint str_idx = 0;
+    string o = _interpret_cap(s, str_idx, stack, args, true);
+    assert(str_idx == s.length);
+    return o;
 }
 
 void main(string[] args) {
@@ -175,6 +260,24 @@ void main(string[] args) {
     /* str_caps cap = str_caps.clear_screen; */
     str_caps cap = str_caps.parm_rindex;
     /* writeln(interpret_string_cap(ti, cap, 2).replace("\033", "\\033")); */
-    write(interpret_string_cap(ti, cap, 3));
+    /* write(interpret_string_cap(ti, cap, 3)); */
 
+
+    write(interpret_string_cap(ti, str_caps.cursor_address, 7, 22));
+    write(interpret_string_cap(ti, str_caps.enter_bold_mode));
+    write(interpret_string_cap(ti, str_caps.enter_italics_mode));
+
+    static if(1) {
+        assert(args.length > 2);
+        write(interpret_string_cap(ti, str_caps.set_background, to!int(args[1])));
+        write(interpret_string_cap(ti, str_caps.set_foreground, to!int(args[2])));
+        writeln("plouf");
+    } else if(0) {
+        for(uint i=0 ; i<20 ; i++) {
+            write(interpret_string_cap(ti, str_caps.set_background, i));
+            writeln("plouf");
+        }
+    }
+
+    /* writeln(interpret_string_cap(ti, str_caps.set_background, to!int(args[1])).replace("\033", "\\033")); */
 }
