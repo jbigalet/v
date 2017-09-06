@@ -3,6 +3,7 @@ import std.stdio;
 import std.conv;
 import std.array;
 import std.string;
+import core.vararg;
 
 /*
    Info about the terminfo compiled format are hard to find,
@@ -87,7 +88,7 @@ Terminfo parse_terminfo(string path) {
                 assert(string_end > off,
                        format("index error %d, at %d, offset %u",
                               string_end, i, off));
-                ti.strings[i] = string_table[off..string_end-1];
+                ti.strings[i] = string_table[off..string_end];
             }
         }
 
@@ -113,7 +114,67 @@ void print_term_caps(const ref Terminfo ti) {
     /*         writefln("\t%s = %s", cast(str_caps)i, ti.strings[i]); */
 }
 
+
+// TODO string cap interpretation only supports int args atm
+// (xterm & rxvt only seem to need ints)
+// but the spec allows string as arguments
+// TODO 'u6' cap does a %d with nothing on the stack...
+
+string _interpret_cap(string s, ref int[] stack, ref int[] args) {
+    string o = "";
+    uint i = 0;  // string index
+    while(i < s.length) {
+        char c = s[i++];
+        if(c != '%') {
+            o ~= c;
+        } else {
+            c = s[i++];
+            switch(c) {
+                case '%':
+                    o ~= '%';
+                    break;
+
+                case 'd':
+                    assert(stack.length > 0);
+                    o ~= to!string(stack.back);
+                    stack.popBack();
+                    break;
+
+                case 'p':
+                    char n = s[i++];
+                    assert(n >= '1' && n <= '9');
+                    int arg_idx = (n - '1');
+                    assert(arg_idx < args.length);
+                    stack ~= args[arg_idx];
+                    break;
+
+                // TODO handle everything else
+                default: assert(0);
+            }
+        }
+    }
+    return o;
+}
+
+string interpret_string_cap(ref Terminfo ti, str_caps cap, int[] args...) {
+    // TODO asserts should also crash in release mode
+    assert(cap < ti.header.string_count && ti.strings[cap].length > 0);
+    string s = ti.strings[cap].idup;
+    assert(s.indexOf('<') == -1);  // TODO
+    assert(s.indexOf('^') == -1);  // TODO
+    assert(s.indexOf("%s") == -1);  // TODO
+
+    int[] stack;
+    return _interpret_cap(s, stack, args);
+}
+
 void main(string[] args) {
     Terminfo ti = parse_terminfo("/usr/share/terminfo/r/rxvt-unicode-256color");
-    print_term_caps(ti);
+    /* print_term_caps(ti); */
+
+    /* str_caps cap = str_caps.clear_screen; */
+    str_caps cap = str_caps.parm_rindex;
+    /* writeln(interpret_string_cap(ti, cap, 2).replace("\033", "\\033")); */
+    write(interpret_string_cap(ti, cap, 3));
+
 }
