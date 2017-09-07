@@ -4,6 +4,14 @@ import std.conv;
 import std.array;
 import std.string;
 import core.vararg;
+import core.thread;
+import std.algorithm;
+import std.random;
+import core.sys.posix.signal;
+import core.stdc.stdlib;
+import core.sys.posix.sys.ioctl;
+
+enum SIGWINCH = 28;
 
 /*
    Info about the terminfo compiled format are hard to find,
@@ -45,6 +53,19 @@ struct Terminfo {
     bool[] bools;
     ushort[] nums;
     char[][] strings;
+}
+
+struct Terminal {
+    Terminfo info;
+    int width;
+    int height;
+
+    void update_size() {
+        winsize size;
+        ioctl(0, TIOCGWINSZ, &size);
+        width  = size.ws_col;
+        height = size.ws_row;
+    }
 }
 
 Terminfo parse_terminfo(string path) {
@@ -115,6 +136,7 @@ void print_term_caps(const ref Terminfo ti) {
 }
 
 
+// TODO very slow to do this every time (setb/g strings are pretty huge for instance)
 // TODO string cap interpretation only supports int args atm
 // (xterm & rxvt only seem to need ints)
 // but the spec allows string as arguments
@@ -253,8 +275,31 @@ string interpret_string_cap(ref Terminfo ti, str_caps cap, int[] args...) {
     return o;
 }
 
+Terminal term;  // for the signal handlers
+
+extern(C)
+void size_update_handler(int d=0) {
+    term.update_size();
+
+    static if(1) {  // fill screen (except a border) with a random color
+        static color = 0;
+        color = (color+1)%10;
+        write(interpret_string_cap(term.info, str_caps.clear_screen, color));
+        write(interpret_string_cap(term.info, str_caps.set_background, color));
+        write(interpret_string_cap(term.info, str_caps.set_foreground, color));
+        for(uint i=1 ; i<term.width-1 ; i++)
+            for(uint j=1 ; j<term.height-1 ; j++) {
+                write(interpret_string_cap(term.info, str_caps.cursor_address, j, i));
+                write(" ");
+            }
+        stdout.flush();
+    }
+}
+
 void main(string[] args) {
     Terminfo ti = parse_terminfo("/usr/share/terminfo/r/rxvt-unicode-256color");
+    term = Terminal(ti);
+    term.update_size();
     /* print_term_caps(ti); */
 
     /* str_caps cap = str_caps.clear_screen; */
@@ -263,11 +308,12 @@ void main(string[] args) {
     /* write(interpret_string_cap(ti, cap, 3)); */
 
 
-    write(interpret_string_cap(ti, str_caps.cursor_address, 7, 22));
-    write(interpret_string_cap(ti, str_caps.enter_bold_mode));
-    write(interpret_string_cap(ti, str_caps.enter_italics_mode));
+    static if(0) {
+        write(interpret_string_cap(ti, str_caps.clear_screen));
+        write(interpret_string_cap(ti, str_caps.cursor_address, 7, 22));
+        write(interpret_string_cap(ti, str_caps.enter_bold_mode));
+        write(interpret_string_cap(ti, str_caps.enter_italics_mode));
 
-    static if(1) {
         assert(args.length > 2);
         write(interpret_string_cap(ti, str_caps.set_background, to!int(args[1])));
         write(interpret_string_cap(ti, str_caps.set_foreground, to!int(args[2])));
@@ -280,4 +326,69 @@ void main(string[] args) {
     }
 
     /* writeln(interpret_string_cap(ti, str_caps.set_background, to!int(args[1])).replace("\033", "\\033")); */
+
+    sigset(SIGWINCH, &size_update_handler);
+
+    /* while(true) {} */
+
+    static if(1) {
+        // snake demo
+
+        write(interpret_string_cap(ti, str_caps.clear_screen));
+        write(interpret_string_cap(ti, str_caps.save_cursor));
+        write(interpret_string_cap(ti, str_caps.cursor_invisible));
+
+        extern(C) void cleanup_cursor(int d=0) {
+            write(interpret_string_cap(term.info, str_caps.cursor_visible));
+            write(interpret_string_cap(term.info, str_caps.restore_cursor));
+            writeln("cleaning up...");
+            exit(1);
+        }
+        scope(exit) cleanup_cursor();
+        sigset(SIGINT, &cleanup_cursor);
+
+        int[] snake_x = new int[10];
+        int[] snake_y = new int[10];
+        snake_x[] = 10;
+        snake_y[] = 10;
+
+        int next_move_in = 0;
+        int[] dir = [0, 1];
+
+        while(true) {
+            if(next_move_in-- <= 0) {
+                int new_dir = uniform(0, 2)*2-1;  // -1 or 1
+                if(dir[0] == 0) {
+                    dir[0] = new_dir;
+                    dir[1] = 0;
+                } else {  // dir.y == 0
+                    dir[0] = 0;
+                    dir[1] = new_dir;
+                }
+                next_move_in = uniform(5, 50);
+            }
+
+            snake_x ~= (snake_x.back + dir[0] + term.width) % term.width;
+            snake_y ~= (snake_y.back + dir[1] + term.height) % term.height;
+
+            write(interpret_string_cap(ti, str_caps.set_background, 6));
+            write(interpret_string_cap(ti, str_caps.set_foreground, 6));
+            for(uint i=1 ; i<snake_x.length ; i++) {
+                write(interpret_string_cap(ti, str_caps.cursor_address, snake_y[i], snake_x[i]));
+                write(" ");
+            }
+
+            write(interpret_string_cap(ti, str_caps.restore_cursor));
+            write(interpret_string_cap(ti, str_caps.cursor_address, snake_y[0], snake_x[0]));
+            write(" ");
+
+            snake_x = snake_x.remove(0);
+            snake_y = snake_y.remove(0);
+
+            stdout.flush();
+            Thread.sleep(dur!("msecs")(50));
+        }
+    }
+
+
 }
