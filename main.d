@@ -10,6 +10,7 @@ import std.random;
 import core.sys.posix.signal;
 import core.stdc.stdlib;
 import core.sys.posix.sys.ioctl;
+import std.functional;
 
 enum SIGWINCH = 28;
 
@@ -53,19 +54,6 @@ struct Terminfo {
     bool[] bools;
     ushort[] nums;
     char[][] strings;
-}
-
-struct Terminal {
-    Terminfo info;
-    int width;
-    int height;
-
-    void update_size() {
-        winsize size;
-        ioctl(0, TIOCGWINSZ, &size);
-        width  = size.ws_col;
-        height = size.ws_row;
-    }
 }
 
 Terminfo parse_terminfo(string path) {
@@ -275,6 +263,30 @@ string interpret_string_cap(ref Terminfo ti, str_caps cap, int[] args...) {
     return o;
 }
 
+
+struct Terminal {
+    Terminfo info;
+    int width;
+    int height;
+
+    void update_size() {
+        winsize size;
+        ioctl(0, TIOCGWINSZ, &size);
+        width  = size.ws_col;
+        height = size.ws_row;
+    }
+
+    /* void interpret_cap(str_caps cap)(int[] args...) { */
+    /*     write(interpret_string_cap(this.info, cap, args)); */
+    /* } */
+
+    @property auto opDispatch(string name, T...)(T args) {
+        return write(mixin("interpret_string_cap(this.info, str_caps." ~ name ~ ", args)"));
+        /* return toDelegate(mixin("&interpret_cap!(str_caps." ~ name ~ ")")); */
+    }
+}
+
+
 Terminal term;  // for the signal handlers
 
 extern(C)
@@ -284,12 +296,12 @@ void size_update_handler(int d=0) {
     static if(1) {  // fill screen (except a border) with a random color
         static color = 0;
         color = (color+1)%10;
-        write(interpret_string_cap(term.info, str_caps.clear_screen, color));
-        write(interpret_string_cap(term.info, str_caps.set_background, color));
-        write(interpret_string_cap(term.info, str_caps.set_foreground, color));
+        term.clear_screen();
+        term.set_background(color);
+        term.set_foreground(color);
         for(uint i=1 ; i<term.width-1 ; i++)
             for(uint j=1 ; j<term.height-1 ; j++) {
-                write(interpret_string_cap(term.info, str_caps.cursor_address, j, i));
+                term.cursor_address(j, i);
                 write(" ");
             }
         stdout.flush();
@@ -297,9 +309,7 @@ void size_update_handler(int d=0) {
 }
 
 void cleanup_cursor() {
-    /* write(interpret_string_cap(term.info, str_caps.cursor_normal)); */
-    /* write(interpret_string_cap(term.info, str_caps.restore_cursor)); */
-    write(interpret_string_cap(term.info, str_caps.exit_ca_mode));
+    term.exit_ca_mode();
     writeln("cleaning up...");
 }
 
@@ -321,36 +331,11 @@ void main(string[] args) {
     term.update_size();
     /* print_term_caps(ti); */
 
-    /* str_caps cap = str_caps.clear_screen; */
-    /* str_caps cap = str_caps.parm_rindex; */
-    /* writeln(interpret_string_cap(ti, cap, 2).replace("\033", "\\033")); */
-    /* write(interpret_string_cap(ti, cap, 3)); */
-
-
-    static if(0) {
-        write(interpret_string_cap(ti, str_caps.clear_screen));
-        write(interpret_string_cap(ti, str_caps.cursor_address, 7, 22));
-        write(interpret_string_cap(ti, str_caps.enter_bold_mode));
-        write(interpret_string_cap(ti, str_caps.enter_italics_mode));
-
-        assert(args.length > 2);
-        write(interpret_string_cap(ti, str_caps.set_background, to!int(args[1])));
-        write(interpret_string_cap(ti, str_caps.set_foreground, to!int(args[2])));
-        writeln("plouf");
-    } else if(0) {
-        for(uint i=0 ; i<20 ; i++) {
-            write(interpret_string_cap(ti, str_caps.set_background, i));
-            writeln("plouf");
-        }
-    }
-
-    /* writeln(interpret_string_cap(ti, str_caps.set_background, to!int(args[1])).replace("\033", "\\033")); */
-
     sigset(SIGWINCH, &size_update_handler);
     sigset(SIGINT,   &sigint_handler);
     sigset(SIGSEGV,  &sigsegv_handler);
 
-    write(interpret_string_cap(ti, str_caps.enter_ca_mode));
+    term.enter_ca_mode();
 
     /* while(true) {} */
 
@@ -361,9 +346,10 @@ void main(string[] args) {
     static if(1) {
         // snake demo
 
-        write(interpret_string_cap(ti, str_caps.save_cursor));
-        write(interpret_string_cap(ti, str_caps.clear_screen));
-        write(interpret_string_cap(ti, str_caps.cursor_invisible));
+        /* assert(0); */
+        term.save_cursor();
+        term.clear_screen();
+        term.cursor_invisible();
 
         int[] snake_x = new int[10];
         int[] snake_y = new int[10];
@@ -389,15 +375,15 @@ void main(string[] args) {
             snake_x ~= (snake_x.back + dir[0] + term.width)  % term.width;
             snake_y ~= (snake_y.back + dir[1] + term.height) % term.height;
 
-            write(interpret_string_cap(ti, str_caps.set_background, 6));
-            write(interpret_string_cap(ti, str_caps.set_foreground, 6));
+            term.set_background(6);
+            term.set_foreground(6);
             for(uint i=1 ; i<snake_x.length ; i++) {
-                write(interpret_string_cap(ti, str_caps.cursor_address, snake_y[i], snake_x[i]));
+                term.cursor_address(snake_y[i], snake_x[i]);
                 write(" ");
             }
 
-            write(interpret_string_cap(ti, str_caps.restore_cursor));
-            write(interpret_string_cap(ti, str_caps.cursor_address, snake_y[0], snake_x[0]));
+            term.restore_cursor();
+            term.cursor_address(snake_y[0], snake_x[0]);
             /* write(cast(char)uniform('a', 'z'+1)); */
             write("Joran "[uniform(0, 6)]);
 
