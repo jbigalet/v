@@ -296,6 +296,25 @@ void size_update_handler(int d=0) {
     }
 }
 
+void cleanup_cursor() {
+    /* write(interpret_string_cap(term.info, str_caps.cursor_normal)); */
+    /* write(interpret_string_cap(term.info, str_caps.restore_cursor)); */
+    write(interpret_string_cap(term.info, str_caps.exit_ca_mode));
+    writeln("cleaning up...");
+}
+
+extern(C) void sigint_handler(int d) {
+    cleanup_cursor();
+    writeln("caught sigint");
+    assert(0);  // TODO =(
+}
+
+extern(C) void sigsegv_handler(int d) {
+    cleanup_cursor();
+    writeln("caught sigsegv");
+    assert(0);  // TODO =(
+}
+
 void main(string[] args) {
     Terminfo ti = parse_terminfo("/usr/share/terminfo/r/rxvt-unicode-256color");
     term = Terminal(ti);
@@ -303,7 +322,7 @@ void main(string[] args) {
     /* print_term_caps(ti); */
 
     /* str_caps cap = str_caps.clear_screen; */
-    str_caps cap = str_caps.parm_rindex;
+    /* str_caps cap = str_caps.parm_rindex; */
     /* writeln(interpret_string_cap(ti, cap, 2).replace("\033", "\\033")); */
     /* write(interpret_string_cap(ti, cap, 3)); */
 
@@ -328,24 +347,23 @@ void main(string[] args) {
     /* writeln(interpret_string_cap(ti, str_caps.set_background, to!int(args[1])).replace("\033", "\\033")); */
 
     sigset(SIGWINCH, &size_update_handler);
+    sigset(SIGINT,   &sigint_handler);
+    sigset(SIGSEGV,  &sigsegv_handler);
+
+    write(interpret_string_cap(ti, str_caps.enter_ca_mode));
 
     /* while(true) {} */
+
+    scope(exit) cleanup_cursor();
+
+    /* *cast(char*)0 = 0;  // force segfault */
 
     static if(1) {
         // snake demo
 
-        write(interpret_string_cap(ti, str_caps.clear_screen));
         write(interpret_string_cap(ti, str_caps.save_cursor));
+        write(interpret_string_cap(ti, str_caps.clear_screen));
         write(interpret_string_cap(ti, str_caps.cursor_invisible));
-
-        extern(C) void cleanup_cursor(int d=0) {
-            write(interpret_string_cap(term.info, str_caps.cursor_visible));
-            write(interpret_string_cap(term.info, str_caps.restore_cursor));
-            writeln("cleaning up...");
-            exit(1);
-        }
-        scope(exit) cleanup_cursor();
-        sigset(SIGINT, &cleanup_cursor);
 
         int[] snake_x = new int[10];
         int[] snake_y = new int[10];
@@ -368,7 +386,7 @@ void main(string[] args) {
                 next_move_in = uniform(5, 50);
             }
 
-            snake_x ~= (snake_x.back + dir[0] + term.width) % term.width;
+            snake_x ~= (snake_x.back + dir[0] + term.width)  % term.width;
             snake_y ~= (snake_y.back + dir[1] + term.height) % term.height;
 
             write(interpret_string_cap(ti, str_caps.set_background, 6));
@@ -380,15 +398,15 @@ void main(string[] args) {
 
             write(interpret_string_cap(ti, str_caps.restore_cursor));
             write(interpret_string_cap(ti, str_caps.cursor_address, snake_y[0], snake_x[0]));
-            write(" ");
+            /* write(cast(char)uniform('a', 'z'+1)); */
+            write("Joran "[uniform(0, 6)]);
 
             snake_x = snake_x.remove(0);
             snake_y = snake_y.remove(0);
 
             stdout.flush();
-            Thread.sleep(dur!("msecs")(50));
+            Thread.sleep(dur!("msecs")(5));
         }
     }
-
 
 }
