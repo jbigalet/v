@@ -9,8 +9,13 @@ import std.algorithm;
 import std.random;
 import core.sys.posix.signal;
 import core.stdc.stdlib;
+import cstdio = core.stdc.stdio;
 import core.sys.posix.sys.ioctl;
 import std.functional;
+import core.sys.posix.unistd;
+import core.sys.linux.termios;
+import std.typecons;
+import std.process;
 
 enum SIGWINCH = 28;
 
@@ -268,6 +273,8 @@ struct Terminal {
     Terminfo info;
     int width;
     int height;
+    Nullable!termios old_termios;
+    bool ca_mode = false;
 
     void update_size() {
         winsize size;
@@ -281,6 +288,11 @@ struct Terminal {
     /* } */
 
     @property auto opDispatch(string name, T...)(T args) {
+        static if(name == "enter_ca_mode")
+            ca_mode = true;
+        else static if(name == "exit_ca_mode")
+            ca_mode = false;
+
         return write(mixin("interpret_string_cap(this.info, str_caps." ~ name ~ ", args)"));
         /* return toDelegate(mixin("&interpret_cap!(str_caps." ~ name ~ ")")); */
     }
@@ -308,22 +320,180 @@ void size_update_handler(int d=0) {
     }
 }
 
-void cleanup_cursor() {
-    term.exit_ca_mode();
+void cleanup_term() {
+    if(term.ca_mode)
+        term.exit_ca_mode();
+    if(!term.old_termios.isNull()) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &term.old_termios.get());
+        term.old_termios.nullify();
+    }
     writeln("cleaning up...");
 }
 
 extern(C) void sigint_handler(int d) {
-    cleanup_cursor();
+    cleanup_term();
     writeln("caught sigint");
     assert(0);  // TODO =(
 }
 
 extern(C) void sigsegv_handler(int d) {
-    cleanup_cursor();
+    cleanup_term();
     writeln("caught sigsegv");
     assert(0);  // TODO =(
 }
+
+
+// Xlib bindings
+
+struct Display;
+alias ulong Window;
+alias ulong KeySym;
+
+// TODO make mixin generating bitflags
+enum EventMask : long {
+    NoEventMask              = 0,
+    KeyPressMask             = 1 << 0,
+    KeyReleaseMask           = 1 << 1,
+    ButtonPressMask          = 1 << 2,
+    ButtonReleaseMask        = 1 << 3,
+    EnterWindowMask          = 1 << 4,
+    LeaveWindowMask          = 1 << 5,
+    PointerMotionMask        = 1 << 6,
+    PointerMotionHintMask    = 1 << 7,
+    Button1MotionMask        = 1 << 8,
+    Button2MotionMask        = 1 << 9,
+    Button3MotionMask        = 1 << 10,
+    Button4MotionMask        = 1 << 11,
+    Button5MotionMask        = 1 << 12,
+    ButtonMotionMask         = 1 << 13,
+    KeymapStateMask          = 1 << 14,
+    ExposureMask             = 1 << 15,
+    VisibilityChangeMask     = 1 << 16,
+    StructureNotifyMask      = 1 << 17,
+    ResizeRedirectMask       = 1 << 18,
+    SubstructureNotifyMask   = 1 << 19,
+    SubstructureRedirectMask = 1 << 20,
+    FocusChangeMask          = 1 << 21,
+    PropertyChangeMask       = 1 << 22,
+    ColormapChangeMask       = 1 << 23,
+    OwnerGrabButtonMask      = 1 << 24,
+}
+
+enum EventType : int {
+    KeyPress = 2,
+    KeyRelease,
+    ButtonPress,
+    ButtonRelease,
+    MotionNotify,
+    EnterNotify,
+    LeaveNotify,
+    FocusIn,
+    FocusOut,
+    KeymapNotify,
+    Expose,
+    GraphicsExpose,
+    NoExpose,
+    VisibilityNotify,
+    CreateNotify,
+    DestroyNotify,
+    UnmapNotify,
+    MapNotify,
+    MapRequest,
+    ReparentNotify,
+    ConfigureNotify,
+    ConfigureRequest,
+    GravityNotify,
+    ResizeRequest,
+    CirculateNotify,
+    CirculateRequest,
+    PropertyNotify,
+    SelectionClear,
+    SelectionRequest,
+    SelectionNotify,
+    ColormapNotify,
+    ClientMessage,
+    MappingNotify,
+    GenericEvent,
+    LASTEvent,
+}
+
+
+
+// TODO bind yet to be binded sub events
+
+// X's bool type is an int -_-
+enum Bool : int {
+    False,
+    True
+}
+
+struct XKeyEvent {
+    int type;                /* of event */
+    ulong serial;            /* # of last request processed by server */
+    Bool send_event;         /* true if this came from a SendEvent request */
+    Display* display;        /* Display the event was read from */
+    Window window;           /* "event" window it is reported relative to */
+    Window root;             /* root window that the event occurred on */
+    Window subwindow;        /* child window */
+    ulong time;              /* milliseconds */
+    int x, y;                /* pointer x, y coordinates in event window */
+    int x_root, y_root;      /* coordinates relative to root */
+    uint state;              /* key or button mask */
+    uint keycode;            /* detail */
+    Bool same_screen;        /* same screen flag */
+}
+
+alias XKeyPressedEvent  = XKeyEvent;
+alias XKeyReleasedEvent = XKeyEvent;
+
+union XEvent {
+    int type;
+    /* XAnyEvent xany; */
+    XKeyEvent xkey;
+    /* XButtonEvent xbutton; */
+    /* XMotionEvent xmotion; */
+    /* XCrossingEvent xcrossing; */
+    /* XFocusChangeEvent xfocus; */
+    /* XExposeEvent xexpose; */
+    /* XGraphicsExposeEvent xgraphicsexpose; */
+    /* XNoExposeEvent xnoexpose; */
+    /* XVisibilityEvent xvisibility; */
+    /* XCreateWindowEvent xcreatewindow; */
+    /* XDestroyWindowEvent xdestroywindow; */
+    /* XUnmapEvent xunmap; */
+    /* XMapEvent xmap; */
+    /* XMapRequestEvent xmaprequest; */
+    /* XReparentEvent xreparent; */
+    /* XConfigureEvent xconfigure; */
+    /* XGravityEvent xgravity; */
+    /* XResizeRequestEvent xresizerequest; */
+    /* XConfigureRequestEvent xconfigurerequest; */
+    /* XCirculateEvent xcirculate; */
+    /* XCirculateRequestEvent xcirculaterequest; */
+    /* XPropertyEvent xproperty; */
+    /* XSelectionClearEvent xselectionclear; */
+    /* XSelectionRequestEvent xselectionrequest; */
+    /* XSelectionEvent xselection; */
+    /* XColormapEvent xcolormap; */
+    /* XClientMessageEvent xclient; */
+    /* XMappingEvent xmapping; */
+    /* XErrorEvent xerror; */
+    /* XKeymapEvent xkeymap; */
+    long[24] pad;
+};
+
+struct XComposeStatus {
+    char* compose_ptr;
+    int chars_matched;
+}
+
+extern (C) Display* XOpenDisplay(const char*);
+extern (C) int XSelectInput(Display*, Window, EventMask);
+extern (C) int XNextEvent(Display*, XEvent*);
+extern (C) Bool XkbSetDetectableAutoRepeat(Display*, Bool, Bool*);
+extern (C) KeySym XLookupKeysym(XKeyEvent*, int);
+extern (C) int XLookupString(XKeyEvent*, char*, int, KeySym*, XComposeStatus*);
+
 
 void main(string[] args) {
     Terminfo ti = parse_terminfo("/usr/share/terminfo/r/rxvt-unicode-256color");
@@ -331,15 +501,91 @@ void main(string[] args) {
     term.update_size();
     /* print_term_caps(ti); */
 
+    scope(exit) cleanup_term();
     sigset(SIGWINCH, &size_update_handler);
     sigset(SIGINT,   &sigint_handler);
     sigset(SIGSEGV,  &sigsegv_handler);
 
+    // setup stdin in raw mode (except for signal handling: keep ISIG to allow breaking on CTRL C)
+    // on exit, restore the old state
+    // TODO probably no necessary anymore
+    termios old_termios;
+    tcgetattr(STDIN_FILENO, &old_termios);
+    term.old_termios = old_termios;
+
+    termios new_termios = old_termios;
+
+static if(0) {
+    new_termios.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP
+                           | INLCR | IGNCR | ICRNL | IXON);
+    new_termios.c_oflag &= ~OPOST;
+    new_termios.c_lflag &= ~(ECHO | ECHONL | ICANON | IEXTEN);  // keep ISIG to allow signals on ctrl c
+    new_termios.c_cflag &= ~(CSIZE | PARENB);
+    new_termios.c_cflag |= CS8;
+} else {
+    new_termios.c_lflag &= ~(ECHO | ICANON);
+}
+
+    tcsetattr(STDIN_FILENO, TCSANOW, &new_termios);
+
+
+    // switch keyboard to raw mode
+    /* int kbmode; */
+    /* int rawmode = ioctl(0, 0x4B44, 2); */
+    /* assert(rawmode >= 0, "set raw mode error: " ~ to!string(rawmode)); */
+
+    /* while(true) { */
+    /*     int i = fgetc(cstdio.stdin); */
+    /*     writeln("key hit: ", i); */
+    /*     if(i == 3) return; */
+    /* } */
+
+
+    string s_window_id = environment.get("WINDOWID");
+    if(s_window_id is null) assert(0);
+    int window_id = to!int(s_window_id);
+    writeln("window id: ", window_id);
+
+    Display* display = XOpenDisplay(null);
+    Window current_window = window_id;
+    XSelectInput(display, current_window, EventMask.KeyPressMask | EventMask.KeyReleaseMask);
+
+    Bool supported;
+    XkbSetDetectableAutoRepeat(display, Bool.True, &supported);  // dont emit 'release' events on keyrepeat, only 'pressed' ones
+
     term.enter_ca_mode();
 
-    /* while(true) {} */
+    while(true) {
+        XEvent ev;
+        XNextEvent(display, &ev);
+        switch(ev.type) {
+            case EventType.KeyPress:
+                write("keypress: ");
+                goto print_key;
+            case EventType.KeyRelease:
+                write("keyrelease: ");
 
-    scope(exit) cleanup_cursor();
+print_key:
+                /* KeySym key = XLookupKeysym(&ev.xkey, 0);  // TODO this seem bugged - it should return caps letters if the SHIFT key is pressed, but it does not */
+                char str;
+                KeySym key;
+                int strlen =  XLookupString(&ev.xkey, &str, 1, &key, null);
+                if(strlen > 0 && str > 0x20 && str <= 0x7f) {  // print ascii chars
+                    writeln("[ascii] ", str);
+                } else {
+                    writeln("[key]   ", key);
+                }
+
+                /* if(key > 0x20 && key <= 0x7f)  // keysym seem to be ascii chars, at least until 128 */
+                /*     writeln("[ascii] ", cast(char)key); */
+                /* else */
+                /*     writeln("[key]   ", key); */
+
+                break;
+
+            default: assert(0);
+        }
+    }
 
     /* *cast(char*)0 = 0;  // force segfault */
 
@@ -394,5 +640,4 @@ void main(string[] args) {
             Thread.sleep(dur!("msecs")(5));
         }
     }
-
 }
