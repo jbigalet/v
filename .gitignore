@@ -2,3 +2,8 @@
 Session.vim
 main
 *.o
+*.a
+*.di
+autogen/*.o
+autogen/*.a
+autogen/*.di

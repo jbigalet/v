@@ -1,4 +1,3 @@
-import autogen.caps;
 import std.stdio;
 import std.conv;
 import std.array;
@@ -16,6 +15,9 @@ import core.sys.posix.unistd;
 import core.sys.linux.termios;
 import std.typecons;
 import std.process;
+
+import autogen.caps;
+import keysym;
 
 enum SIGWINCH = 28;
 
@@ -347,7 +349,6 @@ extern(C) void sigsegv_handler(int d) {
 
 struct Display;
 alias ulong Window;
-alias ulong KeySym;
 
 // TODO make mixin generating bitflags
 enum EventMask : long {
@@ -560,7 +561,7 @@ static if(0) {
         XNextEvent(display, &ev);
         switch(ev.type) {
             case EventType.KeyPress:
-                write("keypress: ");
+                write("keypress:   ");
                 goto print_key;
             case EventType.KeyRelease:
                 write("keyrelease: ");
@@ -570,16 +571,12 @@ print_key:
                 char str;
                 KeySym key;
                 int strlen =  XLookupString(&ev.xkey, &str, 1, &key, null);
-                if(strlen > 0 && str > 0x20 && str <= 0x7f) {  // print ascii chars
-                    writeln("[ascii] ", str);
+                if(strlen > 0 && str >= 0x20 && str <= 0x7f) {  // print ascii chars
+                    writeln("[char] ", str);
                 } else {
-                    writeln("[key]   ", key);
+                    writeln("[key]  ", key);
+                    /* writeln("[key]  ", cast(ulong)key); */
                 }
-
-                /* if(key > 0x20 && key <= 0x7f)  // keysym seem to be ascii chars, at least until 128 */
-                /*     writeln("[ascii] ", cast(char)key); */
-                /* else */
-                /*     writeln("[key]   ", key); */
 
                 break;
 

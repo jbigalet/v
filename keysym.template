@@ -1,0 +1,22 @@
+module keysym;
+
+import std.conv;
+
+// this should be a simple enum
+// but the builtin toString function takes 5 seconds (!) to compile
+// and I found no other way to precompile it than this (TODO find a better solution?)
+
+struct KeySym {
+    _KeySym val;
+    alias val this;
+
+    string toString() {
+        return to!string(val);
+    }
+
+    enum _KeySym : ulong {
+
+        <KEYSYMDEF>
+
+    };
+}
