@@ -15,6 +15,7 @@ import core.sys.posix.unistd;
 import core.sys.linux.termios;
 import std.typecons;
 import std.process;
+import std.mmfile;
 
 import autogen.caps;
 import keysym;
@@ -307,7 +308,7 @@ extern(C)
 void size_update_handler(int d=0) {
     term.update_size();
 
-    static if(1) {  // fill screen (except a border) with a random color
+    static if(0) {  // fill screen (except a border) with a random color
         static color = 0;
         color = (color+1)%10;
         term.clear_screen();
@@ -335,13 +336,13 @@ void cleanup_term() {
 extern(C) void sigint_handler(int d) {
     cleanup_term();
     writeln("caught sigint");
-    assert(0);  // TODO =(
+    exit(1);
 }
 
 extern(C) void sigsegv_handler(int d) {
     cleanup_term();
     writeln("caught sigsegv");
-    assert(0);  // TODO =(
+    exit(1);
 }
 
 
@@ -495,6 +496,21 @@ extern (C) Bool XkbSetDetectableAutoRepeat(Display*, Bool, Bool*);
 extern (C) KeySym XLookupKeysym(XKeyEvent*, int);
 extern (C) int XLookupString(XKeyEvent*, char*, int, KeySym*, XComposeStatus*);
 
+int find_before(MmFile f, uint pos, char c) {
+    if(pos <= 0) return -1;
+    while(pos > 0)
+        if(f[--pos] == c)
+            return cast(int)pos;
+    return -1;
+}
+
+int find_after(MmFile f, uint pos, char c) {
+    if(f[pos] == c) return cast(int)pos;
+    while(pos < f.length()-1)
+        if(f[++pos] == c)
+            return cast(int)pos;
+    return -1;
+}
 
 void main(string[] args) {
     Terminfo ti = parse_terminfo("/usr/share/terminfo/r/rxvt-unicode-256color");
@@ -555,15 +571,71 @@ static if(0) {
     XkbSetDetectableAutoRepeat(display, Bool.True, &supported);  // dont emit 'release' events on keyrepeat, only 'pressed' ones
 
     term.enter_ca_mode();
+    term.clear_screen();
+    term.cursor_invisible();
+    stdout.flush();
 
+    /* auto fb = scoped!MmFile("main.d"); */
+    MmFile fb = new MmFile("main.d");
+    uint top_left = 0;
     while(true) {
+        uint fidx = top_left;
+        uint col = 0;
+        uint line = 0;
+        term.cursor_address(0, 0);
+        /* term.clear_screen(); */
+        while(line < term.height && fidx < fb.length()) {
+            char c = fb[fidx++];
+            if(c == '\n') {
+                term.clr_eol();
+                line++;
+                col = 0;
+                term.cursor_address(line, col);
+            } else {
+                write(c);
+                col++;
+            }
+
+            if(col >= term.width) {
+                line++;
+                col = 0;
+                term.cursor_address(line, col);
+            }
+        }
+        term.clr_eos();
+        stdout.flush();
+
         XEvent ev;
         XNextEvent(display, &ev);
         switch(ev.type) {
             case EventType.KeyPress:
+                char str;
+                KeySym key;
+                int strlen = XLookupString(&ev.xkey, &str, 1, &key, null);
+                if(key == KeySym.Up) {
+                    if(top_left == 0) break;
+                    int idx = find_before(fb, top_left-1, '\n');
+                    if(idx == -1)
+                        top_left = 0;
+                    else
+                        top_left = idx + 1;
+                    /* term.cursor_address(0, 0); */
+                    /* term.scroll_reverse(); */
+                } else if(key == KeySym.Down) {
+                    int idx = find_after(fb, top_left, '\n');
+                    if(idx != -1)
+                        top_left = idx+1;
+                    /* term.cursor_address(term.height-1, 0); */
+                    /* term.scroll_forward(); */
+                }
+
+                break;
+
                 write("keypress:   ");
                 goto print_key;
             case EventType.KeyRelease:
+                break;
+
                 write("keyrelease: ");
 
 print_key:
@@ -572,7 +644,7 @@ print_key:
                 KeySym key;
                 int strlen =  XLookupString(&ev.xkey, &str, 1, &key, null);
                 if(strlen > 0 && str >= 0x20 && str <= 0x7f) {  // print ascii chars
-                    writeln("[char] ", str);
+                    writeln("[char] '", str, "' (", key, ")");
                 } else {
                     writeln("[key]  ", key);
                     /* writeln("[key]  ", cast(ulong)key); */
@@ -586,7 +658,7 @@ print_key:
 
     /* *cast(char*)0 = 0;  // force segfault */
 
-    static if(1) {
+    static if(0) {
         // snake demo
 
         /* assert(0); */
