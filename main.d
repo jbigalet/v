@@ -512,51 +512,57 @@ int find_after(MmFile f, uint pos, char c) {
     return -1;
 }
 
+struct Split {
+    uint top_left = 0;
+    MmFile fb;
+}
+
+void redraw(Split s) {
+    uint fidx = s.top_left;
+    uint col = 0;
+    uint line = 0;
+    term.cursor_address(0, 0);
+    /* term.clear_screen(); */
+    while(line < term.height && fidx < s.fb.length()) {
+        char c = s.fb[fidx++];
+        if(c == '\n') {
+            term.clr_eol();
+            line++;
+            col = 0;
+            term.cursor_address(line, col);
+        } else {
+            write(c);
+            col++;
+        }
+
+        if(col >= term.width) {
+            line++;
+            col = 0;
+            term.cursor_address(line, col);
+        }
+    }
+    term.clr_eos();
+    stdout.flush();
+}
+
 void main(string[] args) {
-    Terminfo ti = parse_terminfo("/usr/share/terminfo/r/rxvt-unicode-256color");
+    Terminfo ti = parse_terminfo("/usr/share/terminfo/r/rxvt-unicode-256color");  // TODO path not hardcoded
     term = Terminal(ti);
     term.update_size();
-    /* print_term_caps(ti); */
+
+    // setup stdin in mode. On exit, restore the old state
+    termios old_termios;
+    tcgetattr(STDIN_FILENO, &old_termios);
+    term.old_termios = old_termios;
 
     scope(exit) cleanup_term();
     sigset(SIGWINCH, &size_update_handler);
     sigset(SIGINT,   &sigint_handler);
     sigset(SIGSEGV,  &sigsegv_handler);
 
-    // setup stdin in raw mode (except for signal handling: keep ISIG to allow breaking on CTRL C)
-    // on exit, restore the old state
-    // TODO probably no necessary anymore
-    termios old_termios;
-    tcgetattr(STDIN_FILENO, &old_termios);
-    term.old_termios = old_termios;
-
     termios new_termios = old_termios;
-
-static if(0) {
-    new_termios.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP
-                           | INLCR | IGNCR | ICRNL | IXON);
-    new_termios.c_oflag &= ~OPOST;
-    new_termios.c_lflag &= ~(ECHO | ECHONL | ICANON | IEXTEN);  // keep ISIG to allow signals on ctrl c
-    new_termios.c_cflag &= ~(CSIZE | PARENB);
-    new_termios.c_cflag |= CS8;
-} else {
     new_termios.c_lflag &= ~(ECHO | ICANON);
-}
-
     tcsetattr(STDIN_FILENO, TCSANOW, &new_termios);
-
-
-    // switch keyboard to raw mode
-    /* int kbmode; */
-    /* int rawmode = ioctl(0, 0x4B44, 2); */
-    /* assert(rawmode >= 0, "set raw mode error: " ~ to!string(rawmode)); */
-
-    /* while(true) { */
-    /*     int i = fgetc(cstdio.stdin); */
-    /*     writeln("key hit: ", i); */
-    /*     if(i == 3) return; */
-    /* } */
-
 
     string s_window_id = environment.get("WINDOWID");
     if(s_window_id is null) assert(0);
@@ -567,146 +573,69 @@ static if(0) {
     Window current_window = window_id;
     XSelectInput(display, current_window, EventMask.KeyPressMask | EventMask.KeyReleaseMask);
 
+    // dont emit 'release' events on keyrepeat, only 'pressed' ones
     Bool supported;
-    XkbSetDetectableAutoRepeat(display, Bool.True, &supported);  // dont emit 'release' events on keyrepeat, only 'pressed' ones
+    XkbSetDetectableAutoRepeat(display, Bool.True, &supported);
 
     term.enter_ca_mode();
     term.clear_screen();
     term.cursor_invisible();
     stdout.flush();
 
-    /* auto fb = scoped!MmFile("main.d"); */
-    MmFile fb = new MmFile("main.d");
-    uint top_left = 0;
-    while(true) {
-        uint fidx = top_left;
-        uint col = 0;
-        uint line = 0;
-        term.cursor_address(0, 0);
-        /* term.clear_screen(); */
-        while(line < term.height && fidx < fb.length()) {
-            char c = fb[fidx++];
-            if(c == '\n') {
-                term.clr_eol();
-                line++;
-                col = 0;
-                term.cursor_address(line, col);
-            } else {
-                write(c);
-                col++;
-            }
+    bool[] downed_key = new bool[KeySym.max];
 
-            if(col >= term.width) {
-                line++;
-                col = 0;
-                term.cursor_address(line, col);
-            }
-        }
-        term.clr_eos();
-        stdout.flush();
+    /* auto fb = scoped!MmFile("main.d"); */
+    /* MmFile fb = new MmFile("main.d"); */
+    Split main_split;
+    main_split.fb = new MmFile("/home/jbigalet/shady-part-of-me/hatch_export_5k_5k_256");
+    main_split.top_left = 0;
+    while(true) {
+        main_split.redraw();
 
         XEvent ev;
         XNextEvent(display, &ev);
         switch(ev.type) {
             case EventType.KeyPress:
+            {
                 char str;
                 KeySym key;
                 int strlen = XLookupString(&ev.xkey, &str, 1, &key, null);
-                if(key == KeySym.Up) {
-                    if(top_left == 0) break;
-                    int idx = find_before(fb, top_left-1, '\n');
+                bool is_repeat = downed_key[key];
+                downed_key[key] = true;
+
+                // C-y
+                if(key == KeySym.y && downed_key[KeySym.Control_L]) {
+                    if(main_split.top_left == 0) break;
+                    int idx = find_before(main_split.fb, main_split.top_left-1, '\n');
                     if(idx == -1)
-                        top_left = 0;
+                        main_split.top_left = 0;
                     else
-                        top_left = idx + 1;
+                        main_split.top_left = idx + 1;
                     /* term.cursor_address(0, 0); */
                     /* term.scroll_reverse(); */
-                } else if(key == KeySym.Down) {
-                    int idx = find_after(fb, top_left, '\n');
+
+                // C-e
+                } else if(key == KeySym.e && downed_key[KeySym.Control_L]) {
+                    int idx = find_after(main_split.fb, main_split.top_left, '\n');
                     if(idx != -1)
-                        top_left = idx+1;
+                        main_split.top_left = idx+1;
                     /* term.cursor_address(term.height-1, 0); */
                     /* term.scroll_forward(); */
                 }
 
                 break;
+            }
 
-                write("keypress:   ");
-                goto print_key;
             case EventType.KeyRelease:
-                break;
-
-                write("keyrelease: ");
-
-print_key:
-                /* KeySym key = XLookupKeysym(&ev.xkey, 0);  // TODO this seem bugged - it should return caps letters if the SHIFT key is pressed, but it does not */
+            {
                 char str;
                 KeySym key;
-                int strlen =  XLookupString(&ev.xkey, &str, 1, &key, null);
-                if(strlen > 0 && str >= 0x20 && str <= 0x7f) {  // print ascii chars
-                    writeln("[char] '", str, "' (", key, ")");
-                } else {
-                    writeln("[key]  ", key);
-                    /* writeln("[key]  ", cast(ulong)key); */
-                }
-
+                int strlen = XLookupString(&ev.xkey, &str, 1, &key, null);
+                downed_key[key] = false;
                 break;
+            }
 
             default: assert(0);
-        }
-    }
-
-    /* *cast(char*)0 = 0;  // force segfault */
-
-    static if(0) {
-        // snake demo
-
-        /* assert(0); */
-        term.save_cursor();
-        term.clear_screen();
-        term.cursor_invisible();
-
-        int[] snake_x = new int[10];
-        int[] snake_y = new int[10];
-        snake_x[] = 10;
-        snake_y[] = 10;
-
-        int next_move_in = 0;
-        int[] dir = [0, 1];
-
-        while(true) {
-            if(next_move_in-- <= 0) {
-                int new_dir = uniform(0, 2)*2-1;  // -1 or 1
-                if(dir[0] == 0) {
-                    dir[0] = new_dir;
-                    dir[1] = 0;
-                } else {  // dir.y == 0
-                    dir[0] = 0;
-                    dir[1] = new_dir;
-                }
-                next_move_in = uniform(5, 50);
-            }
-
-            snake_x ~= (snake_x.back + dir[0] + term.width)  % term.width;
-            snake_y ~= (snake_y.back + dir[1] + term.height) % term.height;
-
-            term.set_background(6);
-            term.set_foreground(6);
-            for(uint i=1 ; i<snake_x.length ; i++) {
-                term.cursor_address(snake_y[i], snake_x[i]);
-                write(" ");
-            }
-
-            term.restore_cursor();
-            term.cursor_address(snake_y[0], snake_x[0]);
-            /* write(cast(char)uniform('a', 'z'+1)); */
-            write("Joran "[uniform(0, 6)]);
-
-            snake_x = snake_x.remove(0);
-            snake_y = snake_y.remove(0);
-
-            stdout.flush();
-            Thread.sleep(dur!("msecs")(5));
         }
     }
 }
