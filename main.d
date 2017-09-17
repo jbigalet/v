@@ -303,12 +303,13 @@ struct Terminal {
 
 
 Terminal term;  // for the signal handlers
-Split main_split;
+Buffer main_buf;
+View main_view;
 
 extern(C)
 void size_update_handler(int d=0) {
     term.update_size();
-    main_split.redraw();
+    main_view.redraw();
 }
 
 void cleanup_term() {
@@ -488,47 +489,223 @@ extern (C) Bool XkbSetDetectableAutoRepeat(Display*, Bool, Bool*);
 extern (C) KeySym XLookupKeysym(XKeyEvent*, int);
 extern (C) int XLookupString(XKeyEvent*, char*, int, KeySym*, XComposeStatus*);
 
-int find_before(MmFile f, uint pos, char c) {
-    if(pos <= 0) return -1;
-    while(pos > 0)
-        if(f[--pos] == c)
-            return cast(int)pos;
-    return -1;
+// area holding characters - either a readonly mmap buffer or a append only buffer
+class Block {
+    enum Type {
+        mmaped,
+        allocated,
+    };
+    Type type;
+    union {
+        MmFile file;
+        struct {
+            ulong current_size;
+            char[] data;
+        }
+    }
 }
 
-int find_after(MmFile f, uint pos, char c) {
-    if(f[pos] == c) return cast(int)pos;
-    while(pos < f.length()-1)
-        if(f[++pos] == c)
-            return cast(int)pos;
-    return -1;
+// intrusive double linked list. a piece (or 'span') points to a chunk of text inside a Block
+class Piece {
+    char[] data;
+    Piece prev = null;
+    Piece next = null;
+
+    bool is_sentinel() {
+        return data.length == 0;
+    }
 }
 
-struct Split {
-    uint top_left = 0;
-    uint cursor = 100;
-    MmFile fb;
+// TODO not a great name
+// not a buffer in the programming sense, but in 'text editor buffer' sense
+// - a modified (or not) text file
+class Buffer {
+    Piece begin;  // sentinels
+    Piece end;
+    Block[] blocks;  // every blocks
+    Piece[] pieces;  // every pieces (except the sentinels)
+
+    static Buffer fromFile(string name) {
+        Buffer b = new Buffer();
+
+        b.blocks = new Block[1];
+        b.blocks[0] = new Block();
+        b.blocks[0].type = Block.Type.mmaped;
+        b.blocks[0].file = new MmFile(name);
+
+        b.begin = new Piece();
+        b.begin.data = new char[0];
+        b.end = new Piece();
+        b.end.data = new char[0];
+
+        b.pieces = new Piece[1];
+        b.pieces[0] = new Piece();
+        b.pieces[0].prev = b.begin;
+        b.pieces[0].next = b.end;
+        b.pieces[0].data = cast(char[])b.blocks[0].file[0..b.blocks[0].file.length()];
+
+        b.begin.prev = null;
+        b.begin.next = b.pieces[0];
+        b.end.prev = b.pieces[0];
+        b.end.next = null;
+
+        return b;
+    }
 }
 
-struct Piece {
+struct Location {
+    Piece piece = null;
+    ulong offset = 0;
 
+    invariant {
+        assert(offset < 1000000);
+    }
+
+    bool valid() {
+        return piece !is null && !piece.is_sentinel();
+    }
+
+    static Location invalid = Location(null, 0);
+
+    Location opBinary(string op)(long n) {
+        if(n == 0)
+            return this;
+
+        // TODO this could be shorter
+
+        static if(op == "+") {
+            if(n < 0)
+                return this - (-n);
+
+            if(piece.next is null)
+                return this;
+
+            if(piece.prev is null)  // 'begin' sentinel
+                return Location(piece.next, 0) + (n - 1);
+
+            assert(piece.data.length > 0);
+            if(offset + n <= piece.data.length-1)
+                return Location(piece, offset+n);
+
+            if(piece.next.next is null)  // next is the end sentinel
+                return Location(piece.next, 0);
+
+            assert(offset + n >= piece.data.length);
+            return Location(piece.next, 0)
+                 + (offset + n - piece.data.length);
+
+        } else static if(op == "-") {
+            if(n < 0)
+                return this + (-n);
+
+            if(piece.prev is null)
+                return this;
+
+            if(piece.next is null) {  // 'end' sentinel
+                assert(piece.prev.data.length > 0);
+                return Location(piece.prev, piece.prev.data.length-1) - (n-1);
+            }
+
+            if(offset >= n)
+                return Location(piece, offset - n);
+
+            if(piece.prev.prev is null)  // previous is the begin sentinel
+                return Location(piece.prev, 0);
+
+            assert(n-cast(long)offset-1 >= 0);
+            assert(piece.prev.data.length > 0);
+            return Location(piece.prev, piece.prev.data.length-1)
+                 - (n - offset - 1);
+
+        } else {
+            static assert(0, "Location does not support binary operator '" ~ op ~ "'");
+        }
+    }
+
+    char opUnary(string op)() if(op == "*") {
+        /* assert(piece != null && !piece.is_sentinel()); */
+        if(piece is null || piece.is_sentinel())  // TODO =(
+            return '\0';
+        return piece.data[offset];
+    }
+
+    Location opUnary(string op)() if(op != "*") {
+        static if(op == "++") {
+            this = this + 1;
+            return this;
+        } else static if(op == "--") {
+            this = this - 1;
+            return this;
+        } else {
+            static assert(0, "Location does not support unary operator '" ~ op ~ "'");
+        }
+    }
 }
 
-void redraw(Split s) {
-    uint fidx = s.top_left;
+Location find_before(Location l, char c) {
+    /* if(!l.valid()) return Location.invalid; */
+    while(l.valid())
+        if(*(--l) == c)
+            return l;
+    /* return Location.invalid; */
+    return l;
+}
+
+Location find_after(Location l, char c) {
+    if(*l == c) return l;
+    while(l.valid())
+        if(*(++l) == c)
+            return l;
+    /* return Location.invalid; */
+    return l;
+}
+
+ulong dist_to_line_start(Location l) {
+    ulong r;
+    while(l.valid()) {
+        r++;
+        if(*(--l) == '\n')
+            break;
+    }
+    return r;
+}
+
+
+// 'view' of a buffer
+class View {
+    Buffer* buf;
+    Location top_left;
+    Location cursor;
+
+    this(Buffer* buffer) {
+        assert(buffer != null);
+        buf = buffer;
+        top_left = Location( buf.begin.next, 0 );
+        cursor = top_left;
+    }
+}
+
+void redraw(View v) {
+    Location loc = v.top_left;
     uint col = 0;
     uint line = 0;
     term.cursor_address(0, 0);
-    /* term.clear_screen(); */
-    while(line < term.height && fidx < s.fb.length()) {
-        if(fidx == s.cursor) {
-            term.set_background(7);
-            term.set_foreground(0);
-        } else if(fidx == 0 || fidx == s.cursor+1) {
+    bool restore_cursor_color = true;
+    while(line < term.height && loc.valid()) {
+        if(restore_cursor_color) {
+            restore_cursor_color = false;
             term.set_background(0);
             term.set_foreground(7);
         }
-        char c = s.fb[fidx++];
+
+        if(loc == v.cursor) {
+            term.set_background(7);
+            term.set_foreground(0);
+            restore_cursor_color = true;
+        }
+
+        char c = *loc;
+        loc++;
         if(c == '\n') {
             term.clr_eol();
             line++;
@@ -588,10 +765,10 @@ void main(string[] args) {
 
     bool[] downed_key = new bool[KeySym.max];
 
-    main_split.fb = new MmFile("main.d");
-    main_split.top_left = 0;
+    main_buf = Buffer.fromFile("Makefile");
+    main_view = new View(&main_buf);
     while(true) {
-        main_split.redraw();
+        main_view.redraw();
 
         XEvent ev;
         XNextEvent(display, &ev);
@@ -606,29 +783,21 @@ void main(string[] args) {
 
                 // C-y
                 if(key == KeySym.y && downed_key[KeySym.Control_L]) {
-                    if(main_split.top_left == 0) break;
-                    int idx = find_before(main_split.fb, main_split.top_left-1, '\n');
-                    if(idx == -1)
-                        main_split.top_left = 0;
-                    else
-                        main_split.top_left = idx + 1;
-                    /* term.cursor_address(0, 0); */
-                    /* term.scroll_reverse(); */
+                    Location loc = find_before(main_view.top_left-1, '\n');
+                    main_view.top_left = loc + 1;
 
                 // C-e
                 } else if(key == KeySym.e && downed_key[KeySym.Control_L]) {
-                    int idx = find_after(main_split.fb, main_split.top_left, '\n');
-                    if(idx != -1)
-                        main_split.top_left = idx+1;
-                    /* term.cursor_address(term.height-1, 0); */
-                    /* term.scroll_forward(); */
+                    Location loc = find_after(main_view.top_left, '\n');
+                    if(loc.valid())
+                        main_view.top_left = loc + 1;
 
                 // C-d
                 } else if(key == KeySym.d && downed_key[KeySym.Control_L]) {
                     for(uint i=0 ; i<term.height/2 ; i++) {
-                        int idx = find_after(main_split.fb, main_split.top_left, '\n');
-                        if(idx != -1)
-                            main_split.top_left = idx+1;
+                        Location loc = find_after(main_view.top_left, '\n');
+                        if(loc.valid())
+                            main_view.top_left = loc + 1;
                         else
                             break;
                     }
@@ -636,60 +805,48 @@ void main(string[] args) {
                 // C-u
                 } else if(key == KeySym.u && downed_key[KeySym.Control_L]) {
                     for(uint i=0 ; i<term.height/2 ; i++) {
-                        if(main_split.top_left == 0) break;
-                        int idx = find_before(main_split.fb, main_split.top_left-1, '\n');
-                        if(idx == -1) {
-                            main_split.top_left = 0;
-                            break;
-                        } else {
-                            main_split.top_left = idx + 1;
-                        }
+                        Location loc = find_before(main_view.top_left-1, '\n');
+                        main_view.top_left = loc + 1;
                     }
 
                 // 'arrows'
                 } else if(key == KeySym.j) {
-                    if(main_split.cursor != 0 && main_split.fb[main_split.cursor-1] != '\n')
-                        main_split.cursor--;
+                    Location loc = main_view.cursor - 1;
+                    if(loc.valid() && *loc != '\n')
+                        main_view.cursor--;
 
                 } else if(key == KeySym.m) {
-                    if(main_split.cursor != main_split.fb.length()-1 && main_split.fb[main_split.cursor] != '\n')
-                        main_split.cursor++;
+                    Location loc = main_view.cursor + 1;
+                    if(loc.valid() && *loc != '\n')
+                        main_view.cursor++;
 
                 } else if(key == KeySym.k) {
-                    int idx = find_after(main_split.fb, main_split.cursor, '\n');
-                    if(idx != -1) {
-                        int line_start = find_before(main_split.fb, main_split.cursor, '\n');
-                        if(line_start == -1)  // for clarity
-                            line_start = -1;
-                        int line_offset = main_split.cursor - line_start;
+                    Location loc = find_after(main_view.cursor, '\n');
+                    if(loc.valid()) {
+                        ulong line_offset = dist_to_line_start(main_view.cursor);
+                        for(uint i=0 ; i<line_offset ; i++)
+                            if(*(++loc) == '\n')
+                                break;
 
-                        int line_end = find_after(main_split.fb, idx + 1, '\n');
-                        if(line_end == -1)
-                            main_split.cursor = min(idx+line_offset, main_split.fb.length()-1);
-                        else
-                            main_split.cursor = min(idx + line_offset, line_end);
+                        if(loc.valid())
+                            main_view.cursor = loc;
                     }
 
                 } else if(key == KeySym.l) {
-                    int idx = find_before(main_split.fb, main_split.cursor, '\n');
-                    if(idx != -1) {
-                        int line_offset = main_split.cursor-idx;
-                        int previous_line_start = find_before(main_split.fb, idx, '\n');
-                        if(previous_line_start == -1)
-                            previous_line_start = -1;
-
-                        main_split.cursor = previous_line_start + min(line_offset, idx-previous_line_start);
+                    long line_offset = dist_to_line_start(main_view.cursor);
+                    Location loc = main_view.cursor - line_offset;
+                    if(loc.valid()) {
+                        long previous_line_length = dist_to_line_start(loc);
+                        Location new_loc = loc - max(0, previous_line_length-line_offset);
+                        if(new_loc.valid())
+                            main_view.cursor = new_loc;
                     }
 
                 } else if(key == KeySym.dollar) {
-                    int idx = find_after(main_split.fb, main_split.cursor, '\n');
-                    if(idx == -1)
-                        idx = cast(int)main_split.fb.length()-1;
-                    main_split.cursor = idx;
+                    main_view.cursor = find_after(main_view.cursor, '\n');
 
                 } else if(key == KeySym._0) {
-                    int idx = find_before(main_split.fb, main_split.cursor, '\n');
-                    main_split.cursor = idx == -1 ? 0 : idx + 1;
+                    main_view.cursor = find_before(main_view.cursor, '\n') + 1;
 
                 }
 
