@@ -303,46 +303,38 @@ struct Terminal {
 
 
 Terminal term;  // for the signal handlers
+Split main_split;
 
 extern(C)
 void size_update_handler(int d=0) {
     term.update_size();
-
-    static if(0) {  // fill screen (except a border) with a random color
-        static color = 0;
-        color = (color+1)%10;
-        term.clear_screen();
-        term.set_background(color);
-        term.set_foreground(color);
-        for(uint i=1 ; i<term.width-1 ; i++)
-            for(uint j=1 ; j<term.height-1 ; j++) {
-                term.cursor_address(j, i);
-                write(" ");
-            }
-        stdout.flush();
-    }
+    main_split.redraw();
 }
 
 void cleanup_term() {
     if(term.ca_mode)
         term.exit_ca_mode();
+
     if(!term.old_termios.isNull()) {
         tcsetattr(STDIN_FILENO, TCSANOW, &term.old_termios.get());
         term.old_termios.nullify();
     }
+
     writeln("cleaning up...");
 }
 
 extern(C) void sigint_handler(int d) {
     cleanup_term();
     writeln("caught sigint");
-    exit(1);
+    /* exit(1); */  // TODO
+    assert(0);
 }
 
 extern(C) void sigsegv_handler(int d) {
     cleanup_term();
     writeln("caught sigsegv");
-    exit(1);
+    /* exit(1); */
+    assert(0);
 }
 
 
@@ -514,7 +506,12 @@ int find_after(MmFile f, uint pos, char c) {
 
 struct Split {
     uint top_left = 0;
+    uint cursor = 100;
     MmFile fb;
+}
+
+struct Piece {
+
 }
 
 void redraw(Split s) {
@@ -524,6 +521,13 @@ void redraw(Split s) {
     term.cursor_address(0, 0);
     /* term.clear_screen(); */
     while(line < term.height && fidx < s.fb.length()) {
+        if(fidx == s.cursor) {
+            term.set_background(7);
+            term.set_foreground(0);
+        } else if(fidx == 0 || fidx == s.cursor+1) {
+            term.set_background(0);
+            term.set_foreground(7);
+        }
         char c = s.fb[fidx++];
         if(c == '\n') {
             term.clr_eol();
@@ -551,16 +555,16 @@ void main(string[] args) {
     term.update_size();
 
     // setup stdin in mode. On exit, restore the old state
-    termios old_termios;
-    tcgetattr(STDIN_FILENO, &old_termios);
-    term.old_termios = old_termios;
+    termios[10] old_termios;  // there seem to be junk after the real termios info, loaded by tcgetattr. to avoid overwriting the world, we have a dummy array (but actually only use the 1st item) TODO =(
+    tcgetattr(STDIN_FILENO, &old_termios[0]);
+    term.old_termios = old_termios[0];
 
     scope(exit) cleanup_term();
     sigset(SIGWINCH, &size_update_handler);
     sigset(SIGINT,   &sigint_handler);
     sigset(SIGSEGV,  &sigsegv_handler);
 
-    termios new_termios = old_termios;
+    termios new_termios = old_termios[0];
     new_termios.c_lflag &= ~(ECHO | ICANON);
     tcsetattr(STDIN_FILENO, TCSANOW, &new_termios);
 
@@ -584,10 +588,7 @@ void main(string[] args) {
 
     bool[] downed_key = new bool[KeySym.max];
 
-    /* auto fb = scoped!MmFile("main.d"); */
-    /* MmFile fb = new MmFile("main.d"); */
-    Split main_split;
-    main_split.fb = new MmFile("/home/jbigalet/shady-part-of-me/hatch_export_5k_5k_256");
+    main_split.fb = new MmFile("main.d");
     main_split.top_left = 0;
     while(true) {
         main_split.redraw();
@@ -621,6 +622,75 @@ void main(string[] args) {
                         main_split.top_left = idx+1;
                     /* term.cursor_address(term.height-1, 0); */
                     /* term.scroll_forward(); */
+
+                // C-d
+                } else if(key == KeySym.d && downed_key[KeySym.Control_L]) {
+                    for(uint i=0 ; i<term.height/2 ; i++) {
+                        int idx = find_after(main_split.fb, main_split.top_left, '\n');
+                        if(idx != -1)
+                            main_split.top_left = idx+1;
+                        else
+                            break;
+                    }
+
+                // C-u
+                } else if(key == KeySym.u && downed_key[KeySym.Control_L]) {
+                    for(uint i=0 ; i<term.height/2 ; i++) {
+                        if(main_split.top_left == 0) break;
+                        int idx = find_before(main_split.fb, main_split.top_left-1, '\n');
+                        if(idx == -1) {
+                            main_split.top_left = 0;
+                            break;
+                        } else {
+                            main_split.top_left = idx + 1;
+                        }
+                    }
+
+                // 'arrows'
+                } else if(key == KeySym.j) {
+                    if(main_split.cursor != 0 && main_split.fb[main_split.cursor-1] != '\n')
+                        main_split.cursor--;
+
+                } else if(key == KeySym.m) {
+                    if(main_split.cursor != main_split.fb.length()-1 && main_split.fb[main_split.cursor] != '\n')
+                        main_split.cursor++;
+
+                } else if(key == KeySym.k) {
+                    int idx = find_after(main_split.fb, main_split.cursor, '\n');
+                    if(idx != -1) {
+                        int line_start = find_before(main_split.fb, main_split.cursor, '\n');
+                        if(line_start == -1)  // for clarity
+                            line_start = -1;
+                        int line_offset = main_split.cursor - line_start;
+
+                        int line_end = find_after(main_split.fb, idx + 1, '\n');
+                        if(line_end == -1)
+                            main_split.cursor = min(idx+line_offset, main_split.fb.length()-1);
+                        else
+                            main_split.cursor = min(idx + line_offset, line_end);
+                    }
+
+                } else if(key == KeySym.l) {
+                    int idx = find_before(main_split.fb, main_split.cursor, '\n');
+                    if(idx != -1) {
+                        int line_offset = main_split.cursor-idx;
+                        int previous_line_start = find_before(main_split.fb, idx, '\n');
+                        if(previous_line_start == -1)
+                            previous_line_start = -1;
+
+                        main_split.cursor = previous_line_start + min(line_offset, idx-previous_line_start);
+                    }
+
+                } else if(key == KeySym.dollar) {
+                    int idx = find_after(main_split.fb, main_split.cursor, '\n');
+                    if(idx == -1)
+                        idx = cast(int)main_split.fb.length()-1;
+                    main_split.cursor = idx;
+
+                } else if(key == KeySym._0) {
+                    int idx = find_before(main_split.fb, main_split.cursor, '\n');
+                    main_split.cursor = idx == -1 ? 0 : idx + 1;
+
                 }
 
                 break;
