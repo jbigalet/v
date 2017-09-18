@@ -489,6 +489,16 @@ extern (C) Bool XkbSetDetectableAutoRepeat(Display*, Bool, Bool*);
 extern (C) KeySym XLookupKeysym(XKeyEvent*, int);
 extern (C) int XLookupString(XKeyEvent*, char*, int, KeySym*, XComposeStatus*);
 
+enum EditMode {
+    normal,
+    insert,
+}
+
+struct VState {
+    EditMode mode = EditMode.normal;
+}
+VState vstate = VState.init;
+
 // area holding characters - either a readonly mmap buffer or a append only buffer
 class Block {
     enum Type {
@@ -510,6 +520,8 @@ class Piece {
     char[] data;
     Piece prev = null;
     Piece next = null;
+    Block block;
+    Buffer buffer;
 
     bool is_sentinel() {
         return data.length == 0;
@@ -522,31 +534,33 @@ class Piece {
 class Buffer {
     Piece begin;  // sentinels
     Piece end;
-    Block[] blocks;  // every blocks
-    Piece[] pieces;  // every pieces (except the sentinels)
+
+    Block current_block;  // current block with some place left
 
     static Buffer fromFile(string name) {
         Buffer b = new Buffer();
 
-        b.blocks = new Block[1];
-        b.blocks[0] = new Block();
-        b.blocks[0].type = Block.Type.mmaped;
-        b.blocks[0].file = new MmFile(name);
+        Block block = new Block();
+        block.type = Block.Type.mmaped;
+        block.file = new MmFile(name);
 
         b.begin = new Piece();
         b.begin.data = new char[0];
+        b.begin.buffer = b;
         b.end = new Piece();
         b.end.data = new char[0];
+        b.end.buffer = b;
 
-        b.pieces = new Piece[1];
-        b.pieces[0] = new Piece();
-        b.pieces[0].prev = b.begin;
-        b.pieces[0].next = b.end;
-        b.pieces[0].data = cast(char[])b.blocks[0].file[0..b.blocks[0].file.length()];
+        Piece piece = new Piece();
+        piece.prev = b.begin;
+        piece.next = b.end;
+        piece.data = cast(char[])block.file[0..block.file.length()];
+        piece.block = block;
+        piece.buffer = b;
 
         b.begin.prev = null;
-        b.begin.next = b.pieces[0];
-        b.end.prev = b.pieces[0];
+        b.begin.next = piece;
+        b.end.prev = piece;
         b.end.next = null;
 
         return b;
@@ -670,6 +684,61 @@ ulong dist_to_line_start(Location l) {
     return r;
 }
 
+// inserts 'text' before cursor at 'l'
+void insert(Location l, string text) {
+    Block block = l.piece.buffer.current_block;
+    if(block is null || block.current_size + text.length < block.data.length) {
+        l.piece.buffer.current_block = new Block();
+        l.piece.buffer.current_block.type = Block.Type.allocated;
+        l.piece.buffer.current_block.current_size = 0;
+        l.piece.buffer.current_block.data = new char[1 << 20];
+        block = l.piece.buffer.current_block;
+    }
+
+    block.data[block.current_size..block.current_size+text.length] = text;
+
+    // TODO copy pasta
+
+    Piece piece = new Piece();
+    piece.data = block.data[block.current_size..block.current_size+text.length];
+    piece.block = block;
+    piece.buffer = l.piece.buffer;
+
+    if(l.offset == 0) {
+        piece.prev = l.piece.prev;
+        piece.next = l.piece;
+
+        piece.prev.next = piece;
+        piece.next.prev = piece;
+
+        main_view.top_left = Location(l.piece.buffer.begin.next, 0);
+        main_view.cursor = Location(piece, 0);
+
+    } else {
+        Piece before = new Piece();
+        before.data = l.piece.data[0..l.offset];
+        before.block = l.piece.block;
+        before.buffer = l.piece.buffer;
+        before.prev = l.piece.prev;
+        before.next = piece;
+
+        Piece next = new Piece();
+        next.data = l.piece.data[l.offset..$];
+        next.block = l.piece.block;
+        next.buffer = l.piece.buffer;
+        next.prev = piece;
+        next.next = l.piece.next;
+
+        piece.prev = before;
+        piece.next = next;
+
+        before.prev.next = before;
+        next.next.prev = next;
+
+        main_view.top_left = Location(l.piece.buffer.begin.next, 0);
+        main_view.cursor = Location(piece, 0);
+    }
+}
 
 // 'view' of a buffer
 class View {
@@ -781,77 +850,106 @@ void main(string[] args) {
                 bool is_repeat = downed_key[key];
                 downed_key[key] = true;
 
-                // C-y
-                if(key == KeySym.y && downed_key[KeySym.Control_L]) {
-                    Location loc = find_before(main_view.top_left-1, '\n');
-                    main_view.top_left = loc + 1;
+                switch(vstate.mode) {
+                    case EditMode.normal:
+                    {
 
-                // C-e
-                } else if(key == KeySym.e && downed_key[KeySym.Control_L]) {
-                    Location loc = find_after(main_view.top_left, '\n');
-                    if(loc.valid())
-                        main_view.top_left = loc + 1;
-
-                // C-d
-                } else if(key == KeySym.d && downed_key[KeySym.Control_L]) {
-                    for(uint i=0 ; i<term.height/2 ; i++) {
-                        Location loc = find_after(main_view.top_left, '\n');
-                        if(loc.valid())
+                        // C-y
+                        if(key == KeySym.y && downed_key[KeySym.Control_L]) {
+                            Location loc = find_before(main_view.top_left-1, '\n');
                             main_view.top_left = loc + 1;
-                        else
-                            break;
-                    }
 
-                // C-u
-                } else if(key == KeySym.u && downed_key[KeySym.Control_L]) {
-                    for(uint i=0 ; i<term.height/2 ; i++) {
-                        Location loc = find_before(main_view.top_left-1, '\n');
-                        main_view.top_left = loc + 1;
-                    }
+                        // C-e
+                        } else if(key == KeySym.e && downed_key[KeySym.Control_L]) {
+                            Location loc = find_after(main_view.top_left, '\n');
+                            if(loc.valid())
+                                main_view.top_left = loc + 1;
 
-                // 'arrows'
-                } else if(key == KeySym.j) {
-                    Location loc = main_view.cursor - 1;
-                    if(loc.valid() && *loc != '\n')
-                        main_view.cursor--;
+                        // C-d
+                        } else if(key == KeySym.d && downed_key[KeySym.Control_L]) {
+                            for(uint i=0 ; i<term.height/2 ; i++) {
+                                Location loc = find_after(main_view.top_left, '\n');
+                                if(loc.valid())
+                                    main_view.top_left = loc + 1;
+                                else
+                                    break;
+                            }
 
-                } else if(key == KeySym.m) {
-                    Location loc = main_view.cursor + 1;
-                    if(loc.valid() && *loc != '\n')
-                        main_view.cursor++;
+                        // C-u
+                        } else if(key == KeySym.u && downed_key[KeySym.Control_L]) {
+                            for(uint i=0 ; i<term.height/2 ; i++) {
+                                Location loc = find_before(main_view.top_left-1, '\n');
+                                main_view.top_left = loc + 1;
+                            }
 
-                } else if(key == KeySym.k) {
-                    Location loc = find_after(main_view.cursor, '\n');
-                    if(loc.valid()) {
-                        ulong line_offset = dist_to_line_start(main_view.cursor);
-                        for(uint i=0 ; i<line_offset ; i++)
-                            if(*(++loc) == '\n')
-                                break;
+                        // 'arrows'
+                        } else if(key == KeySym.j) {
+                            Location loc = main_view.cursor - 1;
+                            if(loc.valid() && *loc != '\n')
+                                main_view.cursor--;
 
-                        if(loc.valid())
-                            main_view.cursor = loc;
-                    }
+                        } else if(key == KeySym.m) {
+                            Location loc = main_view.cursor + 1;
+                            if(loc.valid() && *loc != '\n')
+                                main_view.cursor++;
 
-                } else if(key == KeySym.l) {
-                    long line_offset = dist_to_line_start(main_view.cursor);
-                    Location loc = main_view.cursor - line_offset;
-                    if(loc.valid()) {
-                        long previous_line_length = dist_to_line_start(loc);
-                        Location new_loc = loc - max(0, previous_line_length-line_offset);
-                        if(new_loc.valid())
-                            main_view.cursor = new_loc;
-                    }
+                        } else if(key == KeySym.k) {
+                            Location loc = find_after(main_view.cursor, '\n');
+                            if(loc.valid()) {
+                                ulong line_offset = dist_to_line_start(main_view.cursor);
+                                for(uint i=0 ; i<line_offset ; i++)
+                                    if(*(++loc) == '\n')
+                                        break;
 
-                } else if(key == KeySym.dollar) {
-                    main_view.cursor = find_after(main_view.cursor, '\n');
+                                if(loc.valid())
+                                    main_view.cursor = loc;
+                            }
 
-                } else if(key == KeySym._0) {
-                    main_view.cursor = find_before(main_view.cursor, '\n') + 1;
+                        } else if(key == KeySym.l) {
+                            long line_offset = dist_to_line_start(main_view.cursor);
+                            Location loc = main_view.cursor - line_offset;
+                            if(loc.valid()) {
+                                long previous_line_length = dist_to_line_start(loc);
+                                Location new_loc = loc - max(0, previous_line_length-line_offset);
+                                if(new_loc.valid())
+                                    main_view.cursor = new_loc;
+                            }
 
-                }
+                        } else if(key == KeySym.dollar) {
+                            main_view.cursor = find_after(main_view.cursor, '\n');
+
+                        } else if(key == KeySym._0) {
+                            main_view.cursor = find_before(main_view.cursor, '\n') + 1;
+
+                        } else if(key == KeySym.i) {
+                            vstate.mode = EditMode.insert;
+
+                        }
+
+                        break;
+                    }  // end case normal mode
+
+                    case EditMode.insert:
+                    {
+
+                        if(key == KeySym.Escape) {
+                            vstate.mode = EditMode.normal;
+
+                        } else if(strlen == 1) {
+                            /* insert(main_view.cursor, "-plop-"); */
+                            insert(main_view.cursor, to!string(str));
+                            main_view.cursor++;
+                        }
+
+                        break;
+                    }  // end case insert mode
+
+                    default: assert(0);
+
+                }  // end switch on mode
 
                 break;
-            }
+            }  // end case key press
 
             case EventType.KeyRelease:
             {
